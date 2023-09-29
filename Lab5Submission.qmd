@@ -1,0 +1,166 @@
+---
+title: "Lab 5"
+author: "Sean Kim"
+format:
+  html:
+    embed-resources: true
+---
+
+```{r}
+library(data.table)
+library(dtplyr)
+library(dplyr)
+```
+
+```{r}
+met <- fread("https://raw.githubusercontent.com/USCbiostats/data-science-data/master/02_met/met_all.gz")
+met[, elev := fifelse(elev ==9999.0, NA_integer_, elev)]
+met[, temp := fifelse(temp < -15, NA_integer_, temp)]
+
+met <- met[!is.na(elev) & !is.na(temp)]
+```
+
+```{r}
+stations <- fread("ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv")
+stations[, USAF := as.integer(USAF)]
+
+stations[, USAF := fifelse(USAF == 999999, NA_integer_, USAF)]
+stations[, CTRY := fifelse(CTRY == "", NA_character_, CTRY)]
+stations[, STATE := fifelse(STATE == "", NA_character_, STATE)]
+
+stations <- unique(stations[, list(USAF, CTRY, STATE)])
+
+stations <- stations[!is.na(USAF)]
+
+stations[, n:= 1:.N, by = .(USAF)]
+stations <- stations[n == 1,][, n := NULL]
+```
+
+```{r}
+alt_merge <- met %>%
+  inner_join(stations, by = c("USAFID" = "USAF"))
+alt_merge <- alt_merge[!is.na(lat)]
+```
+
+Question 1: Representative station for the US
+
+```{r}
+quantiles <- alt_merge %>%
+  summarize(
+    MedianTemp = quantile(temp, probs = 0.5, na.rm = TRUE),
+    MedianWindSpeed = quantile(wind.sp, probs = 0.5, na.rm = TRUE),
+    MedianPressure = quantile(atm.press, probs = 0.5, na.rm = TRUE)
+  )
+```
+
+Median Stations representative of the US:
+
+Temp: 23.5C
+
+Wind speed: 2.1
+
+Pressure: 1014
+
+```{r}
+closest_stations <- alt_merge[, ClosePress := abs(atm.press - quantiles$MedianPressure)]
+closest_stations <- alt_merge[, CloseTemp := abs(temp - quantiles$MedianTemp)]
+closest_stations <- alt_merge[, CloseWind := abs(wind.sp - quantiles$MedianWindSpeed)]
+                            
+
+representative_stations_US <- closest_stations[, .SD[which.min(CloseTemp + ClosePress + CloseWind),
+                                                .(CloseTemp, ClosePress, CloseWind)],
+                                               by = USAFID]
+representative_stations_US
+```
+
+The three stations that best represent the US in terms of median temp, wind speed, and atmospheric pressure are USAFID 690150, 720175, and 720198.
+
+Question 2: Representative Station per State
+
+```{r}
+MedianState <- alt_merge[, .(
+    MedianTemp      = median(temp, na.rm=TRUE),
+    MedianWindSpeed   = median(wind.sp, na.rm=TRUE),
+    MedianPressure = median(atm.press, na.rm = TRUE), 
+    Latitude = median(lat, na.rm = TRUE), 
+    ID = unique(USAFID)
+    ),
+    by = STATE
+    ][order(STATE)]
+MedianState[, EuclideanDist := sqrt((MedianTemp - median(MedianTemp))^2 +
+                                    (MedianWindSpeed - median(MedianWindSpeed))^2 +
+                                    (MedianPressure - median(MedianPressure))^2)]
+representative_stations <- MedianState[, .SD[which.min(abs(MedianTemp) + 
+                                                  abs(MedianWindSpeed) + 
+                                                  abs(MedianPressure)), 
+                                                .(ID, Latitude, MedianTemp, MedianWindSpeed, MedianPressure)],
+                                         by = STATE]
+representative_stations
+```
+
+Displayed table of the sites (ID = USAFID) that best represent their respective states.
+
+Question 3 - In the middle?
+
+```{r}
+library(leaflet)
+```
+
+```{r}
+state_midpoints <- alt_merge[, .(MidLat = mean(lat, na.rm = TRUE),
+                                   MidLon = mean(lon, na.rm = TRUE)),
+                               by = STATE]
+alt_merge[, MidPointLat := mean(lat, na.rm = TRUE), by = STATE]
+alt_merge[, MidPointLon := mean(lon, na.rm = TRUE), by = STATE]
+alt_merge[, DistanceToMidpoint := sqrt((lat - MidPointLat)^2 + (lon - MidPointLon)^2)]
+
+closest_stations_midpoint <- alt_merge[, .SD[which.min(DistanceToMidpoint)],
+                                         by = STATE]
+
+
+map <- leaflet() %>%
+  addTiles()
+
+map <- map %>%
+  addCircleMarkers(
+    data = state_midpoints,
+    lat = ~MidLat,
+    lng = ~MidLon,
+    radius = 3,
+    color = "blue",
+    popup = ~STATE
+  )
+
+# Plot stations identified in this question with a different color
+map <- map %>%
+  addCircleMarkers(
+    data = closest_stations_midpoint,
+    lat = ~lat,
+    lng = ~lon,
+    radius = 3,
+    color = "red",
+    popup = ~USAFID
+  )
+
+# Display the map
+map
+```
+
+Question 4 - Means of means
+
+```{r}
+met_means <- alt_merge [, .(avgTemp = mean(temp, na.rm = TRUE)), by = STATE]
+
+avgTempCat <- alt_merge [, avgTemp := mean(temp, na.rm = TRUE), by = STATE]
+avgTempCat[, TempCat := cut(avgTemp, breaks = c(-Inf, 20, 25, Inf), labels = c("Low", "Mid", "High"))]
+
+summary_table <- alt_merge[, .(NumEntries = .N,
+                                 NumNAEntries = sum(is.na(temp)),
+                                 NumStations = length(unique(USAFID)),
+                                 NumStates = length(unique(STATE)),
+                                 MeanTemp = mean(temp, na.rm = TRUE),
+                                 MeanWindSpeed = mean(wind.sp, na.rm = TRUE),
+                                 MeanPressure = mean(atm.press, na.rm = TRUE)),
+                             by = TempCat]
+summary_table
+```
